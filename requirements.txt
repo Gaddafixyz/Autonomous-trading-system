@@ -1,0 +1,25 @@
+# Core dependencies
+python-dotenv==1.0.0
+
+# Data handling
+numpy==1.24.3
+pandas==2.0.3
+
+# Technical indicators (fallback if ta-lib fails)
+talib-rt==0.4.19
+
+# Async and WebSocket (for Phase 2+)
+aiohttp==3.8.5
+websockets==11.0.3
+
+# Logging enhancements
+colorlog==6.7.0
+
+# Testing
+pytest==7.4.0
+
+# Binance SDK (official)
+binance-connector==3.6.0
+
+# Performance monitoring (optional)
+memory-profiler==0.61.0
