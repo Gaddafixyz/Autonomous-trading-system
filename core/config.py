@@ -3,6 +3,9 @@ Configuration management for the trading system.
 
 Loads settings from environment variables (via .env file) and provides
 validated dataclasses for all configuration aspects.
+
+All dataclasses are mutable (no frozen=True) so LiveTrader and tests
+can override values without FrozenInstanceError.
 """
 
 import os
@@ -18,7 +21,7 @@ class ConfigError(Exception):
     pass
 
 
-@dataclass(frozen=True)
+@dataclass
 class BinanceConfig:
     """Binance API configuration."""
     api_key: str
@@ -31,12 +34,12 @@ class BinanceConfig:
             raise ConfigError("BINANCE_API_KEY must be at least 30 characters")
         if not self.api_secret or len(self.api_secret) < 30:
             raise ConfigError("BINANCE_API_SECRET must be at least 30 characters")
-        # Override base URL for mainnet
+        # Auto-set mainnet URL when not on testnet
         if not self.testnet:
-            object.__setattr__(self, "base_url", "https://fapi.binance.com")
+            self.base_url = "https://fapi.binance.com"
 
 
-@dataclass(frozen=True)
+@dataclass
 class TradingConfig:
     """Core trading parameters."""
     symbol: str = "SOLUSDT"
@@ -47,6 +50,8 @@ class TradingConfig:
     max_daily_loss_pct: float = 0.05  # 5% daily loss limit
     max_drawdown_pct: float = 0.10    # 10% max drawdown
     kelly_fraction: float = 0.25      # Conservative 25% Kelly
+    min_order_qty: float = 0.1        # Minimum order quantity in base asset
+    max_order_qty: float = 1000.0     # Maximum order quantity in base asset
 
     def __post_init__(self):
         if not 1.0 <= self.leverage <= 20.0:
@@ -61,15 +66,20 @@ class TradingConfig:
             raise ConfigError("max_drawdown_pct must be between 0 and 1")
         if not 0.0 < self.kelly_fraction <= 1.0:
             raise ConfigError("kelly_fraction must be between 0 and 1")
+        if self.min_order_qty <= 0:
+            raise ConfigError("min_order_qty must be positive")
+        if self.max_order_qty <= self.min_order_qty:
+            raise ConfigError("max_order_qty must be greater than min_order_qty")
 
 
-@dataclass(frozen=True)
+@dataclass
 class StrategyConfig:
     """Strategy parameters for mean reversion and momentum."""
     # Mean Reversion (Bollinger Bands)
     bb_period: int = 20
     bb_std_dev: float = 2.0
-    bb_entry_threshold: float = 0.5   # Entry when price within 0.5σ of lower band
+    # Entry when price is within this many σ of the lower band (0.5 = half a std dev)
+    bb_entry_threshold: float = 0.5
 
     # Momentum (EMA + ADX)
     ema_fast_period: int = 50
@@ -102,7 +112,7 @@ class StrategyConfig:
             raise ConfigError("min_signal_confidence must be between 0 and 1")
 
 
-@dataclass(frozen=True)
+@dataclass
 class BacktestConfig:
     """Backtesting configuration."""
     start_date: str  # ISO format, e.g., "2024-01-01"
@@ -114,7 +124,6 @@ class BacktestConfig:
     data_interval: Literal["1m", "5m", "15m"] = "1m"
 
     def __post_init__(self):
-        # Basic validation – date parsing not done here for simplicity
         if self.initial_capital <= 0:
             raise ConfigError("initial_capital must be positive")
         if not 0.0 <= self.commission_pct <= 0.01:
@@ -125,7 +134,7 @@ class BacktestConfig:
             raise ConfigError("slippage_exit_pct must be non-negative")
 
 
-@dataclass(frozen=True)
+@dataclass
 class LiveTradingConfig:
     """Live trading configuration (paper or real)."""
     mode: Literal["paper", "live"] = "paper"
@@ -161,6 +170,8 @@ class Config:
             max_daily_loss_pct=float(os.getenv("MAX_DAILY_LOSS_PCT", "0.05")),
             max_drawdown_pct=float(os.getenv("MAX_DRAWDOWN_PCT", "0.10")),
             kelly_fraction=float(os.getenv("KELLY_FRACTION", "0.25")),
+            min_order_qty=float(os.getenv("MIN_ORDER_QTY", "0.1")),
+            max_order_qty=float(os.getenv("MAX_ORDER_QTY", "1000.0")),
         )
         self.strategy = StrategyConfig(
             bb_period=int(os.getenv("BB_PERIOD", "20")),
@@ -186,13 +197,12 @@ class Config:
     def load_paper_trading(cls) -> "Config":
         """Convenience method: force paper trading mode."""
         cfg = cls()
-        # Override live mode to paper
-        object.__setattr__(cfg.live, "mode", "paper")
+        cfg.live.mode = "paper"
         return cfg
 
     @classmethod
     def load_live_trading(cls) -> "Config":
         """Convenience method: force live mode (use with caution)."""
         cfg = cls()
-        object.__setattr__(cfg.live, "mode", "live")
+        cfg.live.mode = "live"
         return cfg
