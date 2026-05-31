@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
-"""
-Test script for Phase 6 Backtesting Engine.
-Requires testnet API keys (only for data fetching).
-"""
+"""Test script for the Backtesting Engine."""
 
 import asyncio
 import sys
@@ -18,27 +15,26 @@ from backtester import DataLoader, BacktestEngine, Reporter
 
 
 async def main():
-    print("=== Phase 6 Backtest Test ===\n")
+    print("=== Backtest Test ===\n")
     cfg = Config()
     client = BinanceClient(cfg.binance)
     loader = DataLoader(client)
 
-    # Fetch 30 days of 5-minute candles
     start = "2026-05-23"
     end = "2026-05-30"
-    print(f"Loading data from {start} to {end}...")
+    print(f"Loading data from {start} to {end}…")
     candles = await loader.load_candles("SOLUSDT", TimeFrame.FIVE_MINUTE, start, end)
     if not candles:
         print("No candles loaded (check API keys and date range).")
         return
     print(f"Loaded {len(candles)} candles\n")
 
-    # Run backtest
     engine = BacktestEngine(initial_equity=10000.0)
     metrics = await engine.run(candles, "SOLUSDT", TimeFrame.FIVE_MINUTE)
 
-    # Report
     Reporter.print_summary(metrics)
+    # FIX: get trades directly from engine instead of reaching into internals
+    Reporter.save_json(metrics, engine.get_trades(), "data/backtest_results.json")
 
     print("✅ Backtest completed successfully")
 
