@@ -3,7 +3,7 @@ Generate human-readable reports from backtest results.
 """
 
 import json
-from typing import List
+from typing import List, Optional
 from core.types import BacktestMetrics, Trade
 
 
@@ -13,9 +13,9 @@ class Reporter:
     @staticmethod
     def print_summary(metrics: BacktestMetrics):
         """Print backtest results to console."""
-        print("\n" + "="*50)
+        print("\n" + "=" * 50)
         print("BACKTEST RESULTS")
-        print("="*50)
+        print("=" * 50)
         print(f"Initial equity:  {metrics.initial_equity:.2f} USDT")
         print(f"Final equity:    {metrics.final_equity:.2f} USDT")
         print(f"Total return:    {metrics.total_return:.2%}")
@@ -26,12 +26,21 @@ class Reporter:
         print(f"Profit factor:   {metrics.profit_factor:.2f}")
         print(f"Avg win:         {metrics.avg_win:.2f} USDT")
         print(f"Avg loss:        {metrics.avg_loss:.2f} USDT")
-        print("="*50 + "\n")
+        print("=" * 50 + "\n")
 
     @staticmethod
-    def save_json(metrics: BacktestMetrics, trades: List[Trade], filepath: str):
-        """Export results to JSON."""
-        data = {
+    def save_json(
+        metrics: BacktestMetrics,
+        trades: Optional[List[Trade]],
+        filepath: str,
+    ):
+        """
+        Export results to JSON.
+
+        FIX: `trades` is now Optional so callers can pass engine.get_trades()
+        directly.  Pass None to omit the trades section.
+        """
+        data: dict = {
             "metrics": {
                 "total_return": metrics.total_return,
                 "sharpe_ratio": metrics.sharpe_ratio,
@@ -41,7 +50,9 @@ class Reporter:
                 "total_trades": metrics.total_trades,
                 "final_equity": metrics.final_equity,
             },
-            "trades": [
+        }
+        if trades is not None:
+            data["trades"] = [
                 {
                     "timestamp": t.timestamp,
                     "symbol": t.symbol,
@@ -52,6 +63,5 @@ class Reporter:
                 }
                 for t in trades
             ]
-        }
         with open(filepath, "w") as f:
             json.dump(data, f, indent=2)
