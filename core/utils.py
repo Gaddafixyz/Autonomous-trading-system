@@ -3,6 +3,10 @@ Mathematical utilities for trading:
 - Position sizing (Kelly Criterion)
 - Performance metrics (Sharpe, Sortino, drawdown)
 - Technical indicators (SMA, EMA, BB, ATR, RSI, ADX)
+
+Fixes applied:
+1. ADX calculation: added guard against atr[i] == 0 to prevent division by zero
+   (rare on real price data, but can occur on synthetic/test data)
 """
 
 import math
@@ -185,7 +189,13 @@ def calculate_ema(prices: List[float], period: int) -> List[float]:
 
 
 def calculate_ema_full(prices: List[float], period: int) -> List[float]:
-    """Return EMA values for all indices (with NaN for insufficient data)."""
+    """
+    Return EMA values for all indices (with NaN for insufficient data).
+    
+    Note: Early EMA values (< period) are biased due to initialization with prices[0].
+    These early values should be treated with caution; some traders discard the first
+    period*2 values to ensure sufficient warm-up time.
+    """
     if len(prices) < period:
         return [float('nan')] * len(prices)
     multiplier = 2.0 / (period + 1)
@@ -282,6 +292,9 @@ def calculate_adx(
     """
     Average Directional Index (ADX).
     Returns list of ADX values (0-100, NaN for insufficient data).
+    
+    FIX: Added guard against atr[i] == 0 to prevent division by zero
+    (rare on real price data, but possible on synthetic/test data).
     """
     n = len(high)
     if n < 2 * period:
@@ -317,13 +330,25 @@ def calculate_adx(
 
     # First values: simple average
     atr[period] = sum(tr[1:period+1]) / period
-    plus_di[period] = 100 * (sum(plus_dm[1:period+1]) / period) / atr[period]
-    minus_di[period] = 100 * (sum(minus_dm[1:period+1]) / period) / atr[period]
+    
+    # FIX: Guard against zero ATR
+    if atr[period] > 0:
+        plus_di[period] = 100 * (sum(plus_dm[1:period+1]) / period) / atr[period]
+        minus_di[period] = 100 * (sum(minus_dm[1:period+1]) / period) / atr[period]
+    else:
+        plus_di[period] = 0.0
+        minus_di[period] = 0.0
 
     for i in range(period+1, n):
         atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        plus_di[i] = 100 * ((plus_di[i-1] * (period-1) + plus_dm[i]) / period) / atr[i]
-        minus_di[i] = 100 * ((minus_di[i-1] * (period-1) + minus_dm[i]) / period) / atr[i]
+        
+        # FIX: Guard against zero ATR division
+        if atr[i] > 1e-10:  # Use small epsilon instead of exact zero
+            plus_di[i] = 100 * ((plus_di[i-1] * (period-1) + plus_dm[i]) / period) / atr[i]
+            minus_di[i] = 100 * ((minus_di[i-1] * (period-1) + minus_dm[i]) / period) / atr[i]
+        else:
+            plus_di[i] = plus_di[i-1]
+            minus_di[i] = minus_di[i-1]
 
     # DX and ADX
     dx = [0.0] * n
