@@ -1,11 +1,23 @@
 """
 Paper trading on Binance testnet.
-Uses real WebSocket data, but can either:
-- Place real small orders on testnet (requires API keys)
-- Simulate fills locally for risk-free testing
+
+Fixes applied:
+1. Used self.client.client.ticker_price() (sync, bypasses rate limiter) →
+   replaced with await self.client.get_ticker() (async, rate-limited).
+2. feed.initialize() already subscribes _handle_kline to the kline stream.
+   The extra ws.subscribe_kline() call overwrote that handler (old WS manager)
+   or added a second connection (new multi-handler WS manager).  The extra
+   subscription for _on_kline is still needed, but feed.initialize already
+   handles the internal data-store subscription, so the duplicate is removed
+   by NOT calling ws.subscribe_kline a second time for the same purpose.
+   Instead _on_kline is passed as an additional callback after feed.initialize.
+3. Added _last_signal_time dedup to avoid processing the same closed candle twice.
+4. Added _daily_reset_loop background task that resets PortfolioRisk stats at
+   UTC midnight so daily loss limits don't carry over across trading days.
 """
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from core.config import Config
@@ -22,7 +34,7 @@ from execution import ExecutionEngine
 class PaperTrader:
     """
     Paper trading bot that runs on Binance testnet.
-    Uses real WebSocket data and executes orders (or simulates fills).
+    Uses real WebSocket data and either simulates fills or places real testnet orders.
     """
 
     def __init__(self, simulate_fills: bool = True):
@@ -31,102 +43,117 @@ class PaperTrader:
         self.simulate_fills = simulate_fills
 
         # Components
-        self.client = BinanceClient(self.config.binance, public=False)  # uses testnet keys
+        self.client = BinanceClient(self.config.binance, public=False)
         self.ws = WebSocketManager(testnet=True)
         self.feed = MarketDataFeed(self.client, self.ws)
         self.strategy = HybridStrategy(self.config.trading.symbol, TimeFrame.FIVE_MINUTE)
         self.position_mgr = PositionManager()
         self.kelly = KellySizing()
-        self.portfolio_risk = PortfolioRisk(initial_equity=0)  # will update after balance
+        self.portfolio_risk = PortfolioRisk(initial_equity=0)
         self.execution = ExecutionEngine(self.client, self.position_mgr)
 
         self.running = False
         self.last_equity = 0.0
+        # FIX: track the last closed-candle timestamp to avoid duplicate signal processing
+        self._last_signal_time: int = 0
 
     async def start(self):
         """Start paper trading."""
         self.logger.info("Starting paper trader on Binance testnet")
 
-        # Fetch initial account balance
         account = await self.client.get_account_balance()
         self.portfolio_risk = PortfolioRisk(initial_equity=account.total_equity)
         self.last_equity = account.total_equity
         self.logger.info(f"Initial equity: {account.total_equity:.2f} USDT")
 
-        # Initialize market data feed (load historical + subscribe to live)
+        # Initialize feed: loads historical candles AND subscribes feed._handle_kline
+        # to keep the internal candle store up to date via WebSocket.
         await self.feed.initialize(
             self.config.trading.symbol,
             [TimeFrame.ONE_MINUTE, TimeFrame.FIVE_MINUTE],
-            historical_limit=500
+            historical_limit=500,
         )
 
-        # Start WebSocket connections
+        # FIX: subscribe _on_kline as an ADDITIONAL callback on the same 5m stream.
+        # The WebSocketManager now supports multiple handlers per stream so
+        # feed._handle_kline (data store) and _on_kline (signal generation) both fire.
+        # We do NOT call ws.subscribe_kline for _handle_kline again — feed.initialize
+        # already did that.
         await self.ws.subscribe_kline(
             self.config.trading.symbol,
             TimeFrame.FIVE_MINUTE.value,
-            self._on_kline
+            self._on_kline,
         )
 
         self.running = True
+
+        # FIX: background task resets daily P&L stats at UTC midnight
+        asyncio.create_task(self._daily_reset_loop())
+
         while self.running:
             await asyncio.sleep(1)
-            # Health check, risk monitoring, etc.
             await self._check_risk()
 
     async def _on_kline(self, data: dict):
-        """Callback when a new 5-minute candle is closed."""
+        """Callback when a 5-minute kline arrives via WebSocket."""
         if not self.running:
             return
 
-        # Get latest candles from feed
+        # Only process when the candle is *closed* (x flag = True)
+        k = data.get('k', {})
+        if not k.get('x', False):
+            return
+
+        # FIX: deduplicate — ignore if we already processed this candle close time
+        close_time: int = k.get('T', 0)
+        if close_time == self._last_signal_time:
+            return
+        self._last_signal_time = close_time
+
         candles = self.feed.get_candles(
             self.config.trading.symbol,
             TimeFrame.FIVE_MINUTE,
-            count=500  # enough for indicators
+            count=500,
         )
         if len(candles) < 200:
-            self.logger.warning("Not enough candles for strategy")
+            self.logger.warning("Not enough candles for strategy, waiting…")
             return
 
-        # Generate signal
         signal = await self.strategy.calculate_signal(candles)
         if not signal or signal.signal_type == SignalType.HOLD:
             return
 
-        self.logger.info(f"Signal: {signal.signal_type.value} with conf {signal.confidence:.2f}")
+        self.logger.info(f"Signal: {signal.signal_type.value} conf={signal.confidence:.2f}")
 
-        # Risk checks before execution
         try:
-            # Update equity (real-time from exchange)
             account = await self.client.get_account_balance()
-            self.portfolio_risk.update_equity(account.total_equity, account.total_equity - self.last_equity)
+            self.portfolio_risk.update_equity(
+                account.total_equity, account.total_equity - self.last_equity
+            )
             self.last_equity = account.total_equity
-
-            # Check daily loss and drawdown
             self.portfolio_risk.check_daily_loss()
             self.portfolio_risk.check_drawdown(account.total_equity)
 
-            # Position size via Kelly
-            kelly_fraction = self.kelly.compute_kelly_fraction()
-            # Get current price
-            ticker = await self.client.client.ticker_price(self.config.trading.symbol)
-            price = float(ticker['price'])
+            # FIX: use await self.client.get_ticker() — the old code called
+            # self.client.client.ticker_price() directly (sync, bypasses rate limiter)
+            ticker = await self.client.get_ticker(self.config.trading.symbol)
+            price = ticker['price']
 
-            # Determine stop loss and take profit (simplified)
-            sl = price * 0.98 if signal.signal_type == SignalType.BUY else price * 1.02
-            tp = price * 1.03 if signal.signal_type == SignalType.BUY else price * 0.97
+            if signal.signal_type == SignalType.BUY:
+                sl = price * 0.98
+                tp = price * 1.03
+            else:
+                sl = price * 1.02
+                tp = price * 0.97
 
-            quantity = self.kelly.calculate_position_size(
-                account.total_equity, price, sl
-            )
-            if quantity < 0.1:
-                self.logger.warning("Position size too small, skipping")
+            quantity = self.kelly.calculate_position_size(account.total_equity, price, sl)
+            if quantity < self.config.trading.min_order_qty:
+                self.logger.warning("Position size below minimum, skipping")
                 return
 
-            # Place order (or simulate)
+            side = OrderSide.LONG if signal.signal_type == SignalType.BUY else OrderSide.SHORT
+
             if self.simulate_fills:
-                # Simulate fill immediately for paper trading
-                side = OrderSide.LONG if signal.signal_type == SignalType.BUY else OrderSide.SHORT
                 self.position_mgr.open_position(
                     symbol=self.config.trading.symbol,
                     side=side,
@@ -135,7 +162,8 @@ class PaperTrader:
                     leverage=self.config.trading.leverage,
                     stop_loss=sl,
                     take_profit=tp,
-                    current_equity=account.total_equity
+                    current_equity=account.total_equity,
+                    strategy_type=self.strategy.strategy_type,
                 )
                 trade_logger.log_entry(
                     symbol=self.config.trading.symbol,
@@ -145,17 +173,16 @@ class PaperTrader:
                     stop_loss=sl,
                     take_profit=tp,
                     strategy="Hybrid",
-                    reason=signal.reason
+                    reason=signal.reason,
                 )
-                self.logger.info(f"Simulated {side.value} order: {quantity} SOL @ {price}")
+                self.logger.info(f"Simulated {side.value}: {quantity:.2f} units @ {price:.2f}")
             else:
-                # Place real order on testnet
                 order = await self.execution.place_order(
                     symbol=self.config.trading.symbol,
-                    side=OrderSide.LONG if signal.signal_type == SignalType.BUY else OrderSide.SHORT,
+                    side=side,
                     quantity=quantity,
                     price=price,
-                    timeout_seconds=30
+                    timeout_seconds=30,
                 )
                 if order:
                     self.logger.info(f"Order placed: {order.order_id}")
@@ -164,26 +191,61 @@ class PaperTrader:
             self.logger.critical(f"Risk limit reached: {e}")
             await self.stop()
         except Exception as e:
-            self.logger.error(f"Error processing signal: {e}")
+            self.logger.error(f"Error processing signal: {e}", exc_info=True)
 
     async def _check_risk(self):
-        """Periodic risk check (e.g., every 10 seconds)."""
+        """Periodic risk check (called every second from the main loop)."""
         try:
             account = await self.client.get_account_balance()
-            self.portfolio_risk.update_equity(account.total_equity, account.total_equity - self.last_equity)
+            self.portfolio_risk.update_equity(
+                account.total_equity, account.total_equity - self.last_equity
+            )
             self.last_equity = account.total_equity
             self.portfolio_risk.check_daily_loss()
             self.portfolio_risk.check_drawdown(account.total_equity)
         except (DailyLossExceededError, MaxDrawdownExceededError) as e:
             self.logger.critical(f"Risk limit reached: {e}")
             await self.stop()
+        except Exception as e:
+            self.logger.error(f"Risk check error: {e}")
+
+    async def _daily_reset_loop(self):
+        """
+        FIX: Reset daily P&L stats at UTC midnight every day.
+        Without this, the daily loss limit accumulates across calendar days
+        making it impossible to trade after any down day.
+        """
+        while self.running:
+            now = datetime.now(timezone.utc)
+            next_midnight = (now + timedelta(days=1)).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
+            wait_seconds = (next_midnight - now).total_seconds()
+            await asyncio.sleep(wait_seconds)
+
+            if not self.running:
+                break
+
+            try:
+                account = await self.client.get_account_balance()
+                self.portfolio_risk.reset_daily(account.total_equity)
+                performance_logger.log_daily_stats(
+                    date=now.strftime("%Y-%m-%d"),
+                    equity=account.total_equity,
+                    daily_pnl=self.position_mgr.get_daily_pnl(),
+                    drawdown=0.0,
+                    trades_today=len(self.position_mgr.closed_trades),
+                )
+                self.position_mgr.reset_daily_pnl()
+                self.logger.info("Daily stats reset at UTC midnight")
+            except Exception as e:
+                self.logger.error(f"Daily reset error: {e}")
 
     async def stop(self):
         """Gracefully stop paper trading."""
         self.logger.info("Stopping paper trader")
         self.running = False
         await self.ws.stop()
-        # Close any open positions
         for symbol in list(self.position_mgr.positions.keys()):
-            await self.execution.close_position(symbol, 0)  # market close
+            await self.execution.close_position(symbol, 0)
         self.logger.info("Paper trader stopped")
