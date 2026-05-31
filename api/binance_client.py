@@ -27,7 +27,6 @@ class BinanceClient:
         self.logger = Logger.get_logger("BinanceClient")
         self.public = public
         if public:
-            # Public client (no API keys needed) for historical data
             self.client = UMFutures(base_url="https://fapi.binance.com")
         else:
             self.client = UMFutures(
@@ -107,24 +106,26 @@ class BinanceClient:
     ) -> Order:
         """Place an order."""
         binance_side = "BUY" if side == OrderSide.LONG else "SELL"
-        resp = await self._request(
-            self.client.new_order,
+        params = dict(
             symbol=symbol,
             side=binance_side,
             type=order_type,
             quantity=quantity,
-            price=price,
-            timeInForce=time_in_force,
         )
+        if order_type == "LIMIT":
+            params["price"] = price
+            params["timeInForce"] = time_in_force
+
+        resp = await self._request(self.client.new_order, **params)
         return Order(
             order_id=str(resp['orderId']),
             symbol=symbol,
             side=side,
             quantity=float(resp['origQty']),
-            price=float(resp['price']),
+            price=float(resp.get('price', price)),
             status=self._map_order_status(resp['status']),
             filled_quantity=float(resp['executedQty']),
-            average_fill_price=float(resp.get('avgPrice', 0)),
+            average_fill_price=float(resp['avgPrice']) if float(resp.get('avgPrice', 0)) else None,
             created_time=resp['updateTime'],
         )
 
@@ -135,6 +136,33 @@ class BinanceClient:
             return True
         except ClientError:
             return False
+
+    async def get_order_status(self, symbol: str, order_id: str) -> Optional[Order]:
+        """
+        FIX: Query the exchange for the latest status of a specific order.
+        Previously missing — FillMonitor only polled local state, so live orders
+        never transitioned to FILLED without an external update.
+        """
+        try:
+            resp = await self._request(
+                self.client.query_order, symbol=symbol, orderId=int(order_id)
+            )
+            avg_price = float(resp.get('avgPrice', 0))
+            return Order(
+                order_id=str(resp['orderId']),
+                symbol=symbol,
+                side=OrderSide.LONG if resp['side'] == 'BUY' else OrderSide.SHORT,
+                quantity=float(resp['origQty']),
+                price=float(resp['price']),
+                status=self._map_order_status(resp['status']),
+                filled_quantity=float(resp['executedQty']),
+                average_fill_price=avg_price if avg_price > 0 else None,
+                created_time=resp.get('time', 0),
+                updated_time=resp.get('updateTime'),
+            )
+        except Exception as e:
+            self.logger.warning(f"Could not fetch order status for {order_id}: {e}")
+            return None
 
     async def get_klines(
         self,
