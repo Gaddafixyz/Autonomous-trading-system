@@ -1,5 +1,10 @@
 """
-Monitors order fill status with timeout and retry logic.
+Monitors order fill status with timeout and exchange polling.
+
+Fix applied: The previous implementation only checked the *local* OrderManager
+state, which was never updated after submission (it stayed SUBMITTED forever).
+Now monitor_order polls the exchange via client.get_order_status() every
+check_interval seconds so real fill/cancel/reject events are detected.
 """
 
 import asyncio
@@ -10,55 +15,68 @@ from execution.order_manager import OrderManager
 from core.types import Order, OrderStatus
 from core.logger import Logger
 
+# Terminal states — stop polling once reached
+_TERMINAL = {OrderStatus.FILLED, OrderStatus.CANCELLED, OrderStatus.REJECTED, OrderStatus.EXPIRED}
+
 
 class FillMonitor:
-    """Periodically check order status until filled or timeout."""
+    """Periodically query the exchange until order reaches a terminal state or times out."""
 
     def __init__(self, client: BinanceClient, order_mgr: OrderManager):
         self.client = client
         self.order_mgr = order_mgr
         self.logger = Logger.get_logger("FillMonitor")
-        self.check_interval = 2  # seconds
+        self.check_interval = 2  # seconds between exchange polls
 
     async def monitor_order(self, order_id: str, timeout_seconds: int = 30) -> Optional[Order]:
         """
-        Monitor order until filled, cancelled, or timeout.
-        Returns updated order if filled, else None.
+        Poll exchange until the order is filled, cancelled, rejected, or timeout.
+
+        Returns the updated Order if filled, None otherwise.
         """
-        start_time = asyncio.get_event_loop().time()
+        local_order = self.order_mgr.get_order(order_id)
+        if not local_order:
+            self.logger.warning(f"Order {order_id} not found in local manager")
+            return None
+
+        symbol = local_order.symbol
+        start = asyncio.get_event_loop().time()
+
         while True:
-            elapsed = asyncio.get_event_loop().time() - start_time
+            elapsed = asyncio.get_event_loop().time() - start
             if elapsed > timeout_seconds:
                 self.logger.warning(f"Order {order_id} timed out after {timeout_seconds}s")
-                return None
+                return self.order_mgr.get_order(order_id)
 
-            # Fetch latest order status from exchange
-            order = self.order_mgr.get_order(order_id)
-            if not order:
-                return None
-
-            try:
-                # In a real implementation, you'd call client.get_order_status(order_id)
-                # For paper trading simulation, we assume fill happens after a short delay.
-                # Here we simulate by checking local order status if it came from exchange.
-                if order.status == OrderStatus.FILLED:
-                    self.logger.info(f"Order {order_id} filled")
-                    return order
-                elif order.status in (OrderStatus.CANCELLED, OrderStatus.REJECTED, OrderStatus.EXPIRED):
-                    self.logger.warning(f"Order {order_id} terminal state: {order.status}")
-                    return None
-            except Exception as e:
-                self.logger.error(f"Error checking order {order_id}: {e}")
+            # FIX: query the exchange for real status
+            exchange_order = await self.client.get_order_status(symbol, order_id)
+            if exchange_order:
+                updated = self.order_mgr.update_order(
+                    order_id,
+                    exchange_order.status,
+                    filled_qty=exchange_order.filled_quantity,
+                    avg_price=exchange_order.average_fill_price,
+                )
+                if updated and updated.status in _TERMINAL:
+                    if updated.status == OrderStatus.FILLED:
+                        self.logger.info(f"Order {order_id} filled @ {updated.average_fill_price}")
+                        return updated
+                    else:
+                        self.logger.warning(f"Order {order_id} terminal state: {updated.status}")
+                        return None
 
             await asyncio.sleep(self.check_interval)
 
     async def simulate_fill(self, order_id: str, delay_seconds: float = 1.0) -> Optional[Order]:
-        """For paper trading: simulate fill after delay."""
+        """For paper trading: simulate an immediate fill after `delay_seconds`."""
         await asyncio.sleep(delay_seconds)
         order = self.order_mgr.get_order(order_id)
         if order and order.status == OrderStatus.SUBMITTED:
-            self.order_mgr.update_order(order_id, OrderStatus.FILLED,
-                                        filled_qty=order.quantity,
-                                        avg_price=order.price)
+            self.order_mgr.update_order(
+                order_id,
+                OrderStatus.FILLED,
+                filled_qty=order.quantity,
+                avg_price=order.price,
+            )
             return self.order_mgr.get_order(order_id)
         return None
