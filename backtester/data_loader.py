@@ -1,5 +1,10 @@
 """
 Load and cache historical kline data from Binance.
+
+Fix applied: The previous pagination loop used insert(0, k) inside the inner
+for-loop, which individually reversed each batch before inserting, producing
+out-of-order candles.  The fix collects all raw dicts in a flat list, then
+sorts by timestamp and deduplicates before converting to Candle objects.
 """
 
 import os
@@ -43,7 +48,10 @@ class DataLoader:
         start_ts = int(datetime.strptime(start_date, "%Y-%m-%d").timestamp() * 1000)
         end_ts = int(datetime.strptime(end_date, "%Y-%m-%d").timestamp() * 1000)
 
-        all_klines = []
+        # FIX: collect raw klines in a plain list; sort and dedup at the end.
+        # Previously, insert(0, k) inside the inner for-loop reversed each
+        # batch individually before inserting, producing scrambled ordering.
+        all_raw: List[dict] = []
         limit = 1000
         current_end = end_ts
 
@@ -56,14 +64,24 @@ class DataLoader:
             )
             if not klines:
                 break
-            for k in klines:
-                if k['timestamp'] >= start_ts and k['timestamp'] < end_ts:
-                    all_klines.insert(0, k)  # keep chronological order
-            # Move current_end to the earliest timestamp we just fetched
-            current_end = klines[0]['timestamp']
+
+            all_raw.extend(klines)
+            earliest_ts = klines[0]['timestamp']
+            current_end = earliest_ts  # walk backwards
+
             if len(klines) < limit:
-                break
-            await asyncio.sleep(0.1)
+                break  # reached the start of available data
+            await asyncio.sleep(0.1)  # stay within rate limits
+
+        # Filter to requested window, sort chronologically, then deduplicate
+        all_raw = [k for k in all_raw if start_ts <= k['timestamp'] < end_ts]
+        all_raw.sort(key=lambda k: k['timestamp'])
+        seen: set = set()
+        deduped: List[dict] = []
+        for k in all_raw:
+            if k['timestamp'] not in seen:
+                seen.add(k['timestamp'])
+                deduped.append(k)
 
         candles = [
             Candle(
@@ -76,10 +94,14 @@ class DataLoader:
                 quote_asset_volume=k['quote_asset_volume'],
                 interval=interval,
             )
-            for k in all_klines
+            for k in deduped
         ]
 
+        # Persist cache using dict representation (TimeFrame enum → string via default=str)
         with open(cache_file, "w") as f:
-            json.dump([c.__dict__ for c in candles], f, default=str)
+            json.dump(
+                [{**c.__dict__, "interval": c.interval.value} for c in candles],
+                f,
+            )
         self.logger.info(f"Cached {len(candles)} candles to {cache_file}")
         return candles
