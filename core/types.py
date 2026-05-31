@@ -1,6 +1,6 @@
 """
 Core data types for the trading system.
-All structures are immutable dataclasses with validation.
+All structures use dataclasses with validation.
 """
 
 from dataclasses import dataclass, field
@@ -111,6 +111,8 @@ class Position:
     leverage: float
     entry_time: int            # Unix milliseconds
     status: PositionStatus = PositionStatus.OPEN
+    # FIX: track which strategy opened this position so Trade records it correctly
+    strategy_type: StrategyType = StrategyType.HYBRID
     stop_loss_price: Optional[float] = None
     take_profit_price: Optional[float] = None
     exit_price: Optional[float] = None
