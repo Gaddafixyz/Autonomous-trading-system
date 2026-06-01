@@ -18,8 +18,10 @@ colorlog==6.7.0
 # Testing
 pytest==7.4.0
 
-# Binance SDK (official)
-binance-connector==3.6.0
+# Binance SDK - USDS-M Futures (updated from binance-connector)
+# Official Binance SDK for USDS-M Futures derivatives trading
+binance-sdk-derivatives-trading-usds-futures>=5.0.0
+binance-common>=0.1.0
 
 # Performance monitoring (optional)
 memory-profiler==0.61.0
