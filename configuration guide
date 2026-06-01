@@ -1,0 +1,430 @@
+# Configuration Guide: USDS-M Futures
+
+This guide explains how to configure your trading system for USDS-M Futures with the new `binance-sdk-derivatives-trading-usds-futures` SDK.
+
+## Overview
+
+**USDS-M Futures** are similar to USDT-M Futures but use USDS (Binance USD) as collateral instead of USDT. They're a separate account on Binance with different leverage and position limits.
+
+---
+
+## .env Configuration
+
+### Basic Setup
+
+```bash
+# API Keys (same as before, works for both USDT-M and USDS-M)
+BINANCE_API_KEY=your-api-key-here-min-30-chars
+BINANCE_API_SECRET=your-api-secret-here-min-30-chars
+
+# Network Selection
+BINANCE_TESTNET=true          # true for testnet, false for mainnet
+
+# Trading Symbol (USDS-M Futures use same symbols, just different settlement)
+TRADING_SYMBOL=SOLUSDT        # Same as USDT-M
+
+# Leverage (1-20x, but check USDS-M limits for your symbol)
+TRADING_LEVERAGE=5.0
+
+# Risk Management - IMPORTANT for USDS-M
+MAX_DAILY_LOSS_PCT=0.05       # 5% daily loss limit
+MAX_DRAWDOWN_PCT=0.10         # 10% max drawdown
+MAX_POSITION_PCT=0.30         # Max 30% of account per position
+KELLY_FRACTION=0.25           # Conservative Kelly Criterion
+
+# Order Sizing
+MIN_ORDER_QTY=0.1             # Minimum trade size (in base asset)
+MAX_ORDER_QTY=1000.0          # Maximum trade size
+
+# Strategy Parameters
+BB_PERIOD=20                  # Bollinger Bands period
+BB_STD_DEV=2.0
+BB_ENTRY_THRESHOLD=0.5        # Entry within 0.5σ of lower band
+EMA_FAST_PERIOD=50
+EMA_SLOW_PERIOD=400
+ADX_PERIOD=14
+ADX_THRESHOLD=25.0
+VOLUME_MULTIPLIER=1.2         # 1.2x average volume
+
+# Live Trading Mode
+LIVE_MODE=paper               # paper or live (START WITH PAPER)
+```
+
+---
+
+## Differences Between USDT-M and USDS-M
+
+### Leverage & Position Limits
+
+| Feature | USDT-M | USDS-M |
+|---------|--------|--------|
+| **Max Leverage** | 20x | 20x (but different by symbol) |
+| **Notional Limit** | $50,000 | Varies by symbol |
+| **Min Notional** | $10 | $10 |
+| **Initial Margin** | Varies | Varies |
+| **Maintenance Margin** | Varies | Varies |
+
+**Action:** Check Binance API `/fapi/v1/exchangeInfo` endpoint for exact limits per symbol.
+
+### Collateral
+
+| Feature | USDT-M | USDS-M |
+|---------|--------|--------|
+| **Collateral** | USDT | USDS |
+| **Account Separated** | No (same account) | YES (separate account) |
+| **Cross Margin** | Available | Available |
+| **Isolated Margin** | Available | Available |
+
+**Action:** Fund a separate USDS-M account. Don't assume your USDT-M balance transfers.
+
+### Settlement & Funding
+
+| Feature | USDT-M | USDS-M |
+|---------|--------|--------|
+| **Funding Intervals** | 8 hours (0:00, 8:00, 16:00 UTC) | Same as USDT-M |
+| **Funding Rate** | Different | Different (track separately) |
+| **Settlement** | USDT | USDS |
+
+**Action:** Monitor funding rates separately for USDS-M; they may differ significantly.
+
+---
+
+## Recommended Configuration for USDS-M
+
+### Conservative (Recommended for Testing)
+
+```bash
+BINANCE_TESTNET=true
+TRADING_LEVERAGE=3.0
+MAX_DAILY_LOSS_PCT=0.03       # 3% limit (strict)
+MAX_DRAWDOWN_PCT=0.05         # 5% limit (strict)
+MAX_POSITION_PCT=0.15         # Max 15% per position
+KELLY_FRACTION=0.15           # Very conservative
+MIN_ORDER_QTY=0.01            # Smaller test trades
+```
+
+**Use case:** Testing on mainnet with small amounts before scaling up.
+
+### Moderate (Recommended for Production)
+
+```bash
+BINANCE_TESTNET=false
+TRADING_LEVERAGE=5.0
+MAX_DAILY_LOSS_PCT=0.05       # 5% limit
+MAX_DRAWDOWN_PCT=0.10         # 10% limit
+MAX_POSITION_PCT=0.25         # Max 25% per position
+KELLY_FRACTION=0.25           # Standard Kelly (25% of full)
+MIN_ORDER_QTY=0.1
+```
+
+**Use case:** Live trading with moderate risk.
+
+### Aggressive (Only After Proven Profitability)
+
+```bash
+BINANCE_TESTNET=false
+TRADING_LEVERAGE=10.0
+MAX_DAILY_LOSS_PCT=0.10       # 10% limit (higher risk)
+MAX_DRAWDOWN_PCT=0.20         # 20% limit (higher risk)
+MAX_POSITION_PCT=0.40         # Max 40% per position
+KELLY_FRACTION=0.50           # 50% of full Kelly
+MIN_ORDER_QTY=0.5
+```
+
+**Use case:** Only with proven strategy and significant capital.
+
+---
+
+## Environment-Specific Configuration
+
+### Testnet Configuration
+
+```bash
+# Use testnet credentials (get from https://testnet.binancefuture.com)
+BINANCE_TESTNET=true
+
+# Testnet API URLs (auto-selected by SDK)
+# - REST: https://testnet.binancefuture.com
+# - WebSocket: wss://stream.binancefuture.com
+
+# Allow riskier testing parameters
+TRADING_LEVERAGE=20.0         # Test max leverage
+MAX_DAILY_LOSS_PCT=0.50       # Generous on testnet
+MAX_POSITION_PCT=0.50
+
+# Smaller position sizes
+MIN_ORDER_QTY=0.01
+MAX_ORDER_QTY=100.0
+```
+
+### Mainnet Configuration
+
+```bash
+# PRODUCTION - Use real credentials
+BINANCE_TESTNET=false
+
+# Mainnet API URLs (auto-selected by SDK)
+# - REST: https://fapi.binance.com
+# - WebSocket: wss://fstream.binance.com
+
+# Strict risk management
+TRADING_LEVERAGE=5.0
+MAX_DAILY_LOSS_PCT=0.05
+MAX_DRAWDOWN_PCT=0.10
+MAX_POSITION_PCT=0.25
+KELLY_FRACTION=0.25
+
+# Real position sizes
+MIN_ORDER_QTY=0.1
+```
+
+---
+
+## Verification Script
+
+After configuring, verify your setup with this Python script:
+
+```python
+#!/usr/bin/env python3
+import sys
+sys.path.insert(0, '.')
+from core import Config
+
+def verify_config():
+    cfg = Config()
+    
+    print("=== Configuration Verification ===\n")
+    
+    # Binance Config
+    print("Binance Configuration:")
+    print(f"  Network: {'TESTNET' if cfg.binance.testnet else 'MAINNET'}")
+    print(f"  Base URL: {cfg.binance.base_url}")
+    print(f"  API Key: {cfg.binance.api_key[:10]}...***")
+    print()
+    
+    # Trading Config
+    print("Trading Configuration:")
+    print(f"  Symbol: {cfg.trading.symbol}")
+    print(f"  Leverage: {cfg.trading.leverage}x")
+    print(f"  Max Position: {cfg.trading.max_position_pct:.0%} of equity")
+    print(f"  Daily Loss Limit: {cfg.trading.max_daily_loss_pct:.0%}")
+    print(f"  Drawdown Limit: {cfg.trading.max_drawdown_pct:.0%}")
+    print(f"  Kelly Fraction: {cfg.trading.kelly_fraction:.0%}")
+    print(f"  Min Order: {cfg.trading.min_order_qty} {cfg.trading.symbol}")
+    print()
+    
+    # Strategy Config
+    print("Strategy Configuration:")
+    print(f"  Bollinger Bands Period: {cfg.strategy.bb_period}")
+    print(f"  EMA Fast/Slow: {cfg.strategy.ema_fast_period}/{cfg.strategy.ema_slow_period}")
+    print(f"  ADX Threshold: {cfg.strategy.adx_threshold}")
+    print()
+    
+    # Live Trading Config
+    print("Live Trading Configuration:")
+    print(f"  Mode: {cfg.live.mode.upper()}")
+    print()
+    
+    # Validation
+    print("=== Validation ===")
+    errors = []
+    warnings = []
+    
+    # Check API keys
+    if not cfg.binance.api_key or len(cfg.binance.api_key) < 30:
+        errors.append("❌ BINANCE_API_KEY is missing or too short")
+    else:
+        print("✅ API credentials configured")
+    
+    # Check leverage
+    if not 1.0 <= cfg.trading.leverage <= 20.0:
+        errors.append(f"❌ Leverage {cfg.trading.leverage} outside 1-20 range")
+    else:
+        print(f"✅ Leverage {cfg.trading.leverage}x is valid")
+    
+    # Check risk limits
+    if cfg.trading.max_daily_loss_pct > 0.20:
+        warnings.append(f"⚠️  Daily loss limit {cfg.trading.max_daily_loss_pct:.0%} is high (>20%)")
+    if cfg.trading.max_drawdown_pct > 0.30:
+        warnings.append(f"⚠️  Drawdown limit {cfg.trading.max_drawdown_pct:.0%} is high (>30%)")
+    if cfg.trading.max_position_pct > 0.50:
+        warnings.append(f"⚠️  Max position {cfg.trading.max_position_pct:.0%} is high (>50%)")
+    
+    # Check Kelly fraction
+    if cfg.trading.kelly_fraction > 0.50:
+        warnings.append(f"⚠️  Kelly fraction {cfg.trading.kelly_fraction:.0%} is aggressive (>50%)")
+    
+    if not errors and not warnings:
+        print("✅ Risk parameters are reasonable")
+    
+    if errors:
+        print("\n❌ ERRORS:")
+        for e in errors:
+            print(f"  {e}")
+        return False
+    
+    if warnings:
+        print("\n⚠️  WARNINGS:")
+        for w in warnings:
+            print(f"  {w}")
+    
+    print("\n✅ Configuration is valid!")
+    return True
+
+if __name__ == "__main__":
+    success = verify_config()
+    sys.exit(0 if success else 1)
+```
+
+**Run it:**
+```bash
+python verify_config.py
+```
+
+---
+
+## Testnet vs Mainnet Trading
+
+### Testnet (wss://stream.binancefuture.com)
+
+**Pros:**
+- Free to test
+- No real money at risk
+- Same API as mainnet
+- Good for strategy validation
+
+**Cons:**
+- Limited USDS funding
+- Lower volume/liquidity
+- Fills may be different
+- No real slippage
+
+**Recommendation:** 
+- Test all strategies on testnet first
+- Run for at least 1 week to validate
+- Check both BUY and SELL signals
+- Verify stop-loss triggers work
+
+### Mainnet (wss://fstream.binance.com)
+
+**Pros:**
+- Real market conditions
+- Realistic fills and slippage
+- Real funding rates
+
+**Cons:**
+- Real money at risk
+- Real volatility and risk
+- Cannot rewind/test "what-if"
+
+**Recommendation:**
+- Start with paper trading on mainnet data
+- Use strict risk parameters initially
+- Gradually increase position size
+- Monitor actively for first week
+
+---
+
+## Configuration Best Practices
+
+### 1. Start Conservative
+
+```bash
+# Begin with small positions and strict limits
+TRADING_LEVERAGE=3.0
+MAX_DAILY_LOSS_PCT=0.02    # 2%
+MAX_DRAWDOWN_PCT=0.05       # 5%
+MAX_POSITION_PCT=0.10       # 10%
+KELLY_FRACTION=0.10         # 10%
+MIN_ORDER_QTY=0.01
+```
+
+### 2. Monitor for One Week
+
+- Check daily P&L
+- Review all trades
+- Verify risk limits work
+- Check for unexpected behavior
+- Monitor logs for errors
+
+### 3. Gradually Increase (if Profitable)
+
+Week 2: Increase parameters by 20%
+Week 3: Increase parameters by 30%
+Week 4+: Increase to desired levels
+
+### 4. Never Skip Testnet
+
+- Always test new strategies on testnet first
+- Test configuration changes
+- Verify API connectivity
+- Test emergency scenarios
+
+### 5. Automate Monitoring
+
+Set up alerts for:
+- Daily loss limit approaching
+- Drawdown exceeding thresholds
+- API errors
+- WebSocket disconnections
+- Unusual trade fills
+
+---
+
+## Troubleshooting
+
+### "Insufficient margin" errors
+
+```bash
+# Reduce leverage or position size
+TRADING_LEVERAGE=3.0
+MAX_POSITION_PCT=0.15
+```
+
+### Trades not filling on testnet
+
+```bash
+# Testnet fills may be simulated; try mainnet paper trading
+BINANCE_TESTNET=false
+LIVE_MODE=paper
+```
+
+### Funding rate concerns
+
+```bash
+# Check current funding rate in Binance app
+# Set alerts if rate > 0.05% (0.0005)
+# Adjust position size if rate is very high
+```
+
+### Position size too small
+
+```bash
+# Increase min order or reduce leverage
+MIN_ORDER_QTY=0.05
+# OR
+TRADING_LEVERAGE=5.0
+```
+
+---
+
+## Summary
+
+| Item | Testnet | Mainnet Paper | Mainnet Live |
+|------|---------|---------------|--------------|
+| **Network** | testnet.binance.com | fapi.binance.com | fapi.binance.com |
+| **Risk** | None | None | REAL |
+| **Leverage** | Test 20x safely | Test actual leverage | Conservative 3-5x |
+| **Duration** | 1 day - 1 week | 1 week - 1 month | Ongoing |
+| **Next Step** | → Paper on mainnet | → Live trading | Scale gradually |
+
+**Recommended progression:**
+```
+Testnet (1-2 weeks)
+    ↓
+Mainnet Paper (1-2 weeks)
+    ↓
+Mainnet Live - Conservative (1-2 weeks)
+    ↓
+Mainnet Live - Production (ongoing)
+```
